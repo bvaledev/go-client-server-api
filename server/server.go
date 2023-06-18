@@ -5,11 +5,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	_ "github.com/mattn/go-sqlite3"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 type QuotationAPIResponse struct {
@@ -24,15 +26,16 @@ func Main() {
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
-	ctxREQ, _ := context.WithTimeout(r.Context(), 200*time.Millisecond)
+	ctxREQ, cancel := context.WithTimeout(r.Context(), 200*time.Millisecond)
+	defer cancel()
 	request, err := http.NewRequestWithContext(ctxREQ, "GET", "https://economia.awesomeapi.com.br/json/last/USD-BRL", nil)
 	if err != nil {
-		panic(err)
+		errorResponse("", err, w)
+		return
 	}
-
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
-		errorResponse(err, w)
+		errorResponse("Request", err, w)
 		return
 	}
 	defer response.Body.Close()
@@ -41,16 +44,17 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	json.NewDecoder(response.Body).Decode(&data)
 	value, err := strconv.ParseFloat(data.Usdbrl.Bid, 64)
 	if err != nil {
-		errorResponse(err, w)
+		errorResponse("", err, w)
 		return
 	}
 
-	quote := entity.NewQuotation(value)
+	ctxDB, cancel := context.WithTimeout(r.Context(), 10*time.Millisecond)
+	defer cancel()
 
-	ctxDB, _ := context.WithTimeout(r.Context(), 10*time.Millisecond)
+	quote := entity.NewQuotation(value)
 	err = saveQuotation(ctxDB, quote)
 	if err != nil {
-		errorResponse(err, w)
+		errorResponse("DB", err, w)
 		return
 	}
 
@@ -60,12 +64,12 @@ func handler(w http.ResponseWriter, r *http.Request) {
 func connectDb() *sql.DB {
 	db, err := sql.Open("sqlite3", "file:locked.sqlite?cache=shared")
 	if err != nil {
-		panic(err)
+		panic(err.Error())
 	}
 	tableQuotations := "CREATE TABLE IF NOT EXISTS quotations (id VARCHAR, bid REAL);"
 	_, err = db.Exec(tableQuotations)
 	if err != nil {
-		panic(err)
+		panic(err.Error())
 	}
 
 	return db
@@ -90,7 +94,7 @@ func loadQuotations() {
 	defer db.Close()
 	res, err := db.Query("select * from quotations")
 	if err != nil {
-		panic(err)
+		panic(err.Error())
 	}
 	var quotations []entity.Quotation
 	for res.Next() {
@@ -100,12 +104,16 @@ func loadQuotations() {
 	}
 }
 
-func errorResponse(err error, w http.ResponseWriter) {
+func errorResponse(name string, err error, w http.ResponseWriter) {
 	if strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
 		w.WriteHeader(http.StatusRequestTimeout)
-		w.Write([]byte(`{"message":"Timeout"}`))
+		message := "{\"message\":\"" + name + " Timeout\"}"
+		w.Write([]byte(message))
+		log.Printf("[SERVER] %s", message)
 		return
 	}
 	w.WriteHeader(http.StatusInternalServerError)
-	w.Write([]byte(`Internal server error`))
+	message := "{\"message\":\"Internal server error\"}"
+	w.Write([]byte(message))
+	log.Printf("[SERVER] %s", message)
 }
